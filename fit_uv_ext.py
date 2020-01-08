@@ -115,7 +115,6 @@ class SPyMinimizeFitter(Fitter):
         model_copy : `~astropy.modeling.FittableModel`
             a copy of the input model with parameters set by the fitter
         """
-
         model_copy = _validate_model(model, self._opt_method.supported_constraints)
         farg = _convert_input(x, y)
         farg = (model_copy, weights, ) + farg
@@ -129,7 +128,7 @@ class SPyMinimizeFitter(Fitter):
 
 class EmceeOpt(Optimization):
     """
-    Interface to emcee sampler
+    Interface to emcee sampler.
     """
     # supported_constraints = ['bounds', 'eqcons', 'ineqcons', 'fixed', 'tied']
 
@@ -137,6 +136,9 @@ class EmceeOpt(Optimization):
         import emcee
         super().__init__(emcee)
         self.fit_info = {
+            'perparams': None,
+            'samples': None,
+            'sampler': None
         }
 
     @staticmethod
@@ -156,9 +158,26 @@ class EmceeOpt(Optimization):
 
         return fit_params_best
 
+    @staticmethod
+    def _get_percentile_params(sampler):
+        """
+        Determine the 50p plus/minus 34p vlaues
+        """
+        nwalkers = len(sampler.lnprobability)
+        # discard the 1st 10% (burn in)
+        flat_samples = sampler.get_chain(discard=int(0.1 * nwalkers), flat=True)
+        nwalkers, ndim = flat_samples.shape
+
+        per_params = []
+        for i in range(ndim):
+            mcmc = np.percentile(flat_samples[:, i], [16, 50, 84])
+            per_params.append(mcmc)
+
+        return list(per_params)
+
     def __call__(self, objfunc, initval, fargs, nsteps, **kwargs):
         """
-        Run the solver.
+        Run the sampler.
 
         Parameters
         ----------
@@ -170,7 +189,6 @@ class EmceeOpt(Optimization):
             other arguments to be passed to the statistic function
         kwargs : dict
             other keyword arguments to be passed to the solver
-
         """
         # optresult = self.opt_method(objfunc, initval, args=fargs)
         # fitparams = optresult['x']
@@ -185,6 +203,7 @@ class EmceeOpt(Optimization):
         samples = sampler.get_chain()
 
         fitparams = self._get_best_fit_params(sampler)
+        self.fit_info['perparams'] = self._get_percentile_params(sampler)
         self.fit_info['sampler'] = sampler
         self.fit_info['samples'] = samples
 
@@ -219,12 +238,11 @@ class EmceeFitter(Fitter):
         The list of arguments (args) is set in the `__call__` method.
         Fitters may overwrite this method, e.g. when statistic functions
         require other arguments.
-
         """
         # get standard leastsquare
         res = self.objective_function(fps, *args)
 
-        # convert to a log probability
+        # convert to a log probability - assumes chisqr/Gaussian unc model
         return -0.5 * res
 
     def __call__(self, model, x, y, weights=None, **kwargs):
@@ -243,8 +261,6 @@ class EmceeFitter(Fitter):
             Weights for fitting.
             For data with Gaussian uncertainties, the weights should be
             1/sigma.
-        nsteps : int, optional
-            number of steps for the samplier
         kwargs : dict
             optional keyword arguments to be passed to the optimizer or the statistic
 
@@ -273,7 +289,7 @@ if __name__ == '__main__':
     mwext = GCC09_MWAvg()
     x = mwext.obsdata_x_iue
     y = mwext.obsdata_axav_iue
-    y_unc = mwext.obsdata_axav_unc_iue
+    y_unc = mwext.obsdata_axav_unc_iue * 10.
     gindxs = x > 3.125
 
     # initialize the model
@@ -282,13 +298,17 @@ if __name__ == '__main__':
     # pick the fitter
     fit = LevMarLSQFitter()
     fit2 = SPyMinimizeFitter()
-    fit3 = EmceeFitter(nsteps=1000)
+    nsteps = 1000
+    fit3 = EmceeFitter(nsteps=nsteps)
 
     # fit the data to the FM90 model using the fitter
     #   use the initialized model as the starting point
     fm90_fit = fit(fm90_init, x[gindxs], y[gindxs], weights=1.0 / y_unc[gindxs])
     fm90_fit2 = fit2(fm90_init, x[gindxs], y[gindxs], weights=1.0 / y_unc[gindxs])
     fm90_fit3 = fit3(fm90_fit2, x[gindxs], y[gindxs], weights=1.0 / y_unc[gindxs])
+    # print(fit3.fit_info['perparams'])
+
+    # print(fit3.fit_info['sampler'].get_autocorr_time())
 
     # plot the observed data, initial guess, and final fit
     fig, ax = plt.subplots()
@@ -296,9 +316,18 @@ if __name__ == '__main__':
     # ax.errorbar(x, y, yerr=y_unc[gindxs], fmt='ko', label='Observed Curve')
     # ax.plot(x[gindxs], fm90_init(x[gindxs]), label='Initial guess')
     ax.plot(x, y, label='Observed Curve')
-    ax.plot(x[gindxs], fm90_fit(x[gindxs]), label='LevMarLSQ')
-    ax.plot(x[gindxs], fm90_fit2(x[gindxs]), label='scipy.minimize')
     ax.plot(x[gindxs], fm90_fit3(x[gindxs]), label='emcee')
+    ax.plot(x[gindxs], fm90_fit2(x[gindxs]), label='scipy.minimize')
+    ax.plot(x[gindxs], fm90_fit(x[gindxs]), label='LevMarLSQ')
+
+    # plot samples from the mcmc chaing
+    flat_samples = fit3.fit_info['sampler'].get_chain(discard=int(0.1 * nsteps), flat=True)
+    inds = np.random.randint(len(flat_samples), size=100)
+    model_copy = fm90_fit3.copy()
+    for ind in inds:
+        sample = flat_samples[ind]
+        _fitter_to_model_params(model_copy, sample)
+        plt.plot(x[gindxs], model_copy(x[gindxs]), "C1", alpha=0.05)
 
     ax.set_xlabel(r'$x$ [$\mu m^{-1}$]')
     ax.set_ylabel('$A(x)/A(V)$')
