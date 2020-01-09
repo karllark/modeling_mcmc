@@ -8,43 +8,13 @@ from astropy.modeling.fitting import (Fitter,
                                       _model_to_fit_params,
                                       _convert_input)
 from astropy.modeling.optimizers import Optimization
-# from astropy.modeling.statistic import leastsquare
+import astropy.units as u
+from astropy.modeling.statistic import leastsquare
 
 from dust_extinction.averages import GCC09_MWAvg
 from dust_extinction.shapes import FM90
 
-
-def leastsquare(measured_vals, updated_model, weights, x, y=None):
-    """
-    Least square statistic with optional weights.
-
-    Parameters
-    ----------
-    measured_vals : `~numpy.ndarray`
-        Measured data values.
-    updated_model : `~astropy.modeling.Model`
-        Model with parameters set by the current iteration of the optimizer.
-    weights : `~numpy.ndarray`
-        Array of weights to apply to each residual.
-    x : `~numpy.ndarray`
-        Independent variable "x" to evaluate the model on.
-    y : `~numpy.ndarray`, optional
-        Independent variable "y" to evaluate the model on, for 2D models.
-
-    Returns
-    -------
-    res : float
-        The sum of least squares.
-    """
-
-    if y is None:
-        model_vals = updated_model(x)
-    else:
-        model_vals = updated_model(x, y)
-    if weights is None:
-        return np.sum((model_vals - measured_vals) ** 2)
-    else:
-        return np.sum((weights * (model_vals - measured_vals)) ** 2)
+from measure_extinction.extdata import ExtData
 
 
 class ScipyMinimize(Optimization):
@@ -291,6 +261,15 @@ if __name__ == '__main__':
     y = mwext.obsdata_axav_iue
     y_unc = mwext.obsdata_axav_unc_iue * 10.
     gindxs = x > 3.125
+
+    # get a saved extnction curve
+    file = '/home/kgordon/Python_git/spitzer_mir_ext/fits/hd147889_hd064802_ext.fits'
+    ext = ExtData(filename=file)
+    gindxs = ext.npts['IUE'] > 0
+    x = 1.0 / ext.waves['IUE'][gindxs].to(u.micron).value
+    y = ext.exts['IUE'][gindxs]
+    y_unc = ext.uncs['IUE'][gindxs]
+    gindxs = x > 3.5
 
     # initialize the model
     fm90_init = FM90()
