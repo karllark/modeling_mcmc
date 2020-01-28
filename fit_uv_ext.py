@@ -3,14 +3,17 @@ import numpy as np
 import argparse
 
 from astropy.modeling.fitting import LevMarLSQFitter
-from astropy.modeling.fitting import (Fitter,
-                                      _validate_model,
-                                      _fitter_to_model_params,
-                                      _model_to_fit_params,
-                                      _convert_input)
+from astropy.modeling.fitting import (
+    Fitter,
+    _validate_model,
+    _fitter_to_model_params,
+    _model_to_fit_params,
+    _convert_input,
+)
 from astropy.modeling.optimizers import Optimization
 import astropy.units as u
 from astropy.modeling.statistic import leastsquare
+from astropy import uncertainty as astrounc
 
 import corner
 
@@ -24,13 +27,14 @@ class ScipyMinimize(Optimization):
     """
     Interface to sciypy.minimize
     """
+
     # supported_constraints = ['bounds', 'eqcons', 'ineqcons', 'fixed', 'tied']
 
     def __init__(self):
         from scipy.optimize import minimize
+
         super().__init__(minimize)
-        self.fit_info = {
-        }
+        self.fit_info = {}
 
     def __call__(self, objfunc, initval, fargs, **kwargs):
         """
@@ -49,7 +53,7 @@ class ScipyMinimize(Optimization):
 
         """
         optresult = self.opt_method(objfunc, initval, args=fargs)
-        fitparams = optresult['x']
+        fitparams = optresult["x"]
         # print(optresult)
 
         return fitparams, self.fit_info
@@ -90,10 +94,11 @@ class SPyMinimizeFitter(Fitter):
         """
         model_copy = _validate_model(model, self._opt_method.supported_constraints)
         farg = _convert_input(x, y)
-        farg = (model_copy, weights, ) + farg
+        farg = (model_copy, weights) + farg
         p0, _ = _model_to_fit_params(model_copy)
         fitparams, self.fit_info = self._opt_method(
-            self.objective_function, p0, farg, **kwargs)
+            self.objective_function, p0, farg, **kwargs
+        )
         _fitter_to_model_params(model_copy, fitparams)
 
         return model_copy
@@ -103,16 +108,14 @@ class EmceeOpt(Optimization):
     """
     Interface to emcee sampler.
     """
+
     # supported_constraints = ['bounds', 'eqcons', 'ineqcons', 'fixed', 'tied']
 
     def __init__(self):
         import emcee
+
         super().__init__(emcee)
-        self.fit_info = {
-            'perparams': None,
-            'samples': None,
-            'sampler': None
-        }
+        self.fit_info = {"perparams": None, "samples": None, "sampler": None}
 
     @staticmethod
     def _get_best_fit_params(sampler):
@@ -121,7 +124,7 @@ class EmceeOpt(Optimization):
         """
         # very likely a faster way
         max_lnp = -1e6
-        nwalkers = len(sampler.lnprobability)
+        nwalkers, nsteps = sampler.lnprobability.shape
         for k in range(nwalkers):
             tmax_lnp = np.max(sampler.lnprobability[k])
             if tmax_lnp > max_lnp:
@@ -130,23 +133,6 @@ class EmceeOpt(Optimization):
                 fit_params_best = sampler.chain[k, indxs[0], :]
 
         return fit_params_best
-
-    @staticmethod
-    def _get_percentile_params(sampler):
-        """
-        Determine the 50p plus/minus 34p vlaues
-        """
-        nwalkers = len(sampler.lnprobability)
-        # discard the 1st 10% (burn in)
-        flat_samples = sampler.get_chain(discard=int(0.1 * nwalkers), flat=True)
-        nwalkers, ndim = flat_samples.shape
-
-        per_params = []
-        for i in range(ndim):
-            mcmc = np.percentile(flat_samples[:, i], [16, 50, 84])
-            per_params.append(mcmc)
-
-        return list(per_params)
 
     def __call__(self, objfunc, initval, fargs, nsteps, **kwargs):
         """
@@ -170,15 +156,13 @@ class EmceeOpt(Optimization):
         nwalkers = 2 * ndim
         pos = initval + 1e-4 * np.random.randn(nwalkers, ndim)
 
-        sampler = self.opt_method.EnsembleSampler(nwalkers, ndim, objfunc,
-                                                  args=fargs)
+        sampler = self.opt_method.EnsembleSampler(nwalkers, ndim, objfunc, args=fargs)
         sampler.run_mcmc(pos, nsteps, progress=True)
         samples = sampler.get_chain()
 
         fitparams = self._get_best_fit_params(sampler)
-        self.fit_info['perparams'] = self._get_percentile_params(sampler)
-        self.fit_info['sampler'] = sampler
-        self.fit_info['samples'] = samples
+        self.fit_info["sampler"] = sampler
+        self.fit_info["samples"] = samples
 
         return fitparams, self.fit_info
 
@@ -218,6 +202,53 @@ class EmceeFitter(Fitter):
         # convert to a log probability - assumes chisqr/Gaussian unc model
         return -0.5 * res
 
+    def _set_uncs_and_posterior(self, model, burn_frac=0.1):
+        """
+        Set the symmetric and asymmetric Gaussian uncertainties
+        TBD: how to set these on the parameter objects not just the model arrays
+
+        Parameters
+        ----------
+        model : astropy model
+            model giving the result from the fitting
+
+        burn_frac : float
+            burn in fraction to ignore in unc calculations
+
+        Returns
+        -------
+        model : astropy model
+            model updated with uncertainties
+        """
+        sampler = self.fit_info['sampler']
+        nwalkers, nsteps = sampler.lnprobability.shape
+        # discard the 1st burn_frac (burn in)
+        flat_samples = sampler.get_chain(discard=int(burn_frac * nsteps), flat=True)
+        nflatsteps, ndim = flat_samples.shape
+
+        model.uncs = np.zeros((ndim))
+        model.uncs_plus = np.zeros((ndim))
+        model.uncs_minus = np.zeros((ndim))
+        for i, pname in enumerate(model.param_names):
+            mcmc = np.percentile(flat_samples[:, i], [16, 50, 84])
+
+            # set the uncertainty arrays - could be done via the parameter objects
+            # but would need an update to the model properties to make this happen
+            model.uncs[i] = 0.5 * (mcmc[2] - mcmc[0])
+            model.uncs_plus[i] = mcmc[2] - mcmc[1]
+            model.uncs_minus[i] = mcmc[1] - mcmc[0]
+
+            # now set uncertainties on the parameter objects themselves
+            param = getattr(model, pname)
+            param.unc = model.uncs[i]
+            param.unc_plus = model.uncs_plus[i]
+            param.unc_minus = model.uncs_minus[i]
+
+            # set the posterior distribution to the samples
+            param.posterior = astrounc.Distribution(flat_samples[:, i])
+
+        return model
+
     def __call__(self, model, x, y, weights=None, **kwargs):
         """
         Fit data to this model.
@@ -245,13 +276,18 @@ class EmceeFitter(Fitter):
 
         model_copy = _validate_model(model, self._opt_method.supported_constraints)
         farg = _convert_input(x, y)
-        farg = (model_copy, weights, ) + farg
+        farg = (model_copy, weights) + farg
         p0, _ = _model_to_fit_params(model_copy)
 
         fitparams, self.fit_info = self._opt_method(
-            self.log_probability, p0, farg, self.nsteps, **kwargs)
+            self.log_probability, p0, farg, self.nsteps, **kwargs
+        )
 
+        # set the output model parameters to the "best fit" parameters
         _fitter_to_model_params(model_copy, fitparams)
+
+        # get and set the symmetric and asymmetric uncertainties on each parameter
+        model_copy = self._set_uncs_and_posterior(model_copy)
 
         return model_copy
 
@@ -285,7 +321,7 @@ def plot_emcee_results(sampler, fit_param_names, filebase=""):
     plt.close(fig)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
 
     # commandline parser
     parser = argparse.ArgumentParser()
@@ -297,22 +333,29 @@ if __name__ == '__main__':
     parser.add_argument("--pdf", help="save figure as a pdf file", action="store_true")
     args = parser.parse_args()
 
+    # a = astrounc.normal(1*u.kpc, std=30*u.pc, n_samples=10000)
+    # b = astrounc.normal(2*u.kpc, std=40*u.pc, n_samples=10000)
+    # c = a + b
+    # z = c.pdf_mean()
+    # print(z)
+    # exit()
+
     # get the data to fit
     mwext = GCC09_MWAvg()
     x = mwext.obsdata_x_iue
     y = mwext.obsdata_axav_iue
-    y_unc = mwext.obsdata_axav_unc_iue * 10.
+    y_unc = mwext.obsdata_axav_unc_iue * 10.0
     gindxs = x > 3.125
 
     # get a saved extnction curve
     file = args.extfile
     # file = '/home/kgordon/Python_git/spitzer_mir_ext/fits/hd147889_hd064802_ext.fits'
-    ofile = file.replace('.fits', '_fm90.fits')
+    ofile = file.replace(".fits", "_fm90.fits")
     ext = ExtData(filename=file)
-    gindxs = ext.npts['IUE'] > 0
-    x = 1.0 / ext.waves['IUE'][gindxs].to(u.micron).value
-    y = ext.exts['IUE'][gindxs]
-    y_unc = ext.uncs['IUE'][gindxs]
+    gindxs = ext.npts["IUE"] > 0
+    x = 1.0 / ext.waves["IUE"][gindxs].to(u.micron).value
+    y = ext.exts["IUE"][gindxs]
+    y_unc = ext.uncs["IUE"][gindxs]
     gindxs = x > 3.5
 
     # initialize the model
@@ -330,20 +373,40 @@ if __name__ == '__main__':
     fm90_fit2 = fit2(fm90_init, x[gindxs], y[gindxs], weights=1.0 / y_unc[gindxs])
     fm90_fit3 = fit3(fm90_fit2, x[gindxs], y[gindxs], weights=1.0 / y_unc[gindxs])
 
+    # checking the uncertainties
+    print("Best Fit Parameters")
+    print(fm90_fit3.parameters)
+    print("Symmetric uncertainties")
+    print(fm90_fit3.uncs)
+    print("Plus uncertainties")
+    print(fm90_fit3.uncs_plus)
+    print("Minus uncertainties")
+    print(fm90_fit3.uncs_minus)
+
+    for i, pname in enumerate(fm90_fit3.param_names):
+        # now set uncertainties on the parameter objects themselves
+        param = getattr(fm90_fit3, pname)
+        print(param.posterior)
+        print("posterior: ", pname, param.posterior.pdf_mean(), param.posterior.pdf_std())
+        print("parameter: ", pname, param.value, param.unc)
+
+    # other stuff
     fm90_best_params = (fm90_fit2.param_names, fm90_fit2.parameters)
 
     # percentile parameters
-    samples = fit3.fit_info['sampler'].chain.reshape((-1, 6))
+    samples = fit3.fit_info["sampler"].chain.reshape((-1, 6))
     per_params = [
         (v[1], v[2] - v[1], v[1] - v[0])
         for v in zip(*np.percentile(samples, [16, 50, 84], axis=0))
     ]
     fm90_per_params = (fm90_fit3.param_names, per_params)
-    ext.save(ofile, fm90_best_params=fm90_best_params,
-             fm90_per_params=fm90_per_params)
+    ext.save(ofile, fm90_best_params=fm90_best_params, fm90_per_params=fm90_per_params)
 
-    plot_emcee_results(fit3.fit_info['sampler'], fm90_fit3.param_names,
-                       filebase=ofile.replace('.fits', ''))
+    plot_emcee_results(
+        fit3.fit_info["sampler"],
+        fm90_fit3.param_names,
+        filebase=ofile.replace(".fits", ""),
+    )
 
     # print(fit3.fit_info['perparams'])
 
@@ -354,13 +417,15 @@ if __name__ == '__main__':
 
     # ax.errorbar(x, y, yerr=y_unc[gindxs], fmt='ko', label='Observed Curve')
     # ax.plot(x[gindxs], fm90_init(x[gindxs]), label='Initial guess')
-    ax.plot(x, y, label='Observed Curve')
-    ax.plot(x[gindxs], fm90_fit3(x[gindxs]), label='emcee')
-    ax.plot(x[gindxs], fm90_fit2(x[gindxs]), label='scipy.minimize')
-    ax.plot(x[gindxs], fm90_fit(x[gindxs]), label='LevMarLSQ')
+    ax.plot(x, y, label="Observed Curve")
+    ax.plot(x[gindxs], fm90_fit3(x[gindxs]), label="emcee")
+    ax.plot(x[gindxs], fm90_fit2(x[gindxs]), label="scipy.minimize")
+    ax.plot(x[gindxs], fm90_fit(x[gindxs]), label="LevMarLSQ")
 
     # plot samples from the mcmc chaing
-    flat_samples = fit3.fit_info['sampler'].get_chain(discard=int(0.1 * nsteps), flat=True)
+    flat_samples = fit3.fit_info["sampler"].get_chain(
+        discard=int(0.1 * nsteps), flat=True
+    )
     inds = np.random.randint(len(flat_samples), size=100)
     model_copy = fm90_fit3.copy()
     for ind in inds:
@@ -368,18 +433,18 @@ if __name__ == '__main__':
         _fitter_to_model_params(model_copy, sample)
         plt.plot(x[gindxs], model_copy(x[gindxs]), "C1", alpha=0.05)
 
-    ax.set_xlabel(r'$x$ [$\mu m^{-1}$]')
+    ax.set_xlabel(r"$x$ [$\mu m^{-1}$]")
     # ax.set_ylabel('$A(x)/A(V)$')
-    ax.set_ylabel(r'$E(\lambda - V)')
+    ax.set_ylabel(r"$E(\lambda - V)")
 
     ax.set_title(file)
     # ax.set_title('FM90 Fit to G09_MWAvg curve')
 
-    ax.legend(loc='best')
+    ax.legend(loc="best")
     plt.tight_layout()
 
     # plot or save to a file
-    outname = ofile.replace('.fits', '')
+    outname = ofile.replace(".fits", "")
     if args.png:
         fig.savefig(outname + ".png")
     elif args.pdf:
