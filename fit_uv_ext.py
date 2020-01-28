@@ -386,7 +386,6 @@ if __name__ == "__main__":
     for i, pname in enumerate(fm90_fit3.param_names):
         # now set uncertainties on the parameter objects themselves
         param = getattr(fm90_fit3, pname)
-        print(param.posterior)
         print("posterior: ", pname, param.posterior.pdf_mean(), param.posterior.pdf_std())
         print("parameter: ", pname, param.value, param.unc)
 
