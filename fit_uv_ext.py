@@ -1,5 +1,6 @@
 import matplotlib.pyplot as plt
 import numpy as np
+import argparse
 
 from astropy.modeling.fitting import LevMarLSQFitter
 from astropy.modeling.fitting import (Fitter,
@@ -10,6 +11,8 @@ from astropy.modeling.fitting import (Fitter,
 from astropy.modeling.optimizers import Optimization
 import astropy.units as u
 from astropy.modeling.statistic import leastsquare
+
+import corner
 
 from dust_extinction.averages import GCC09_MWAvg
 from dust_extinction.shapes import FM90
@@ -253,7 +256,46 @@ class EmceeFitter(Fitter):
         return model_copy
 
 
+def plot_emcee_results(sampler, fit_param_names, filebase=""):
+    """
+    Plot the standard triangle and diagnostic walker plots
+    """
+
+    # plot the walker chains for all parameters
+    nwalkers, nsteps, ndim = sampler.chain.shape
+    fig, ax = plt.subplots(ndim, sharex=True, figsize=(13, 13))
+    walk_val = np.arange(nsteps)
+    for i in range(ndim):
+        for k in range(nwalkers):
+            ax[i].plot(walk_val, sampler.chain[k, :, i], "-")
+            ax[i].set_ylabel(fit_param_names[i])
+    fig.savefig("%s_walker_param_values.png" % filebase)
+    plt.close(fig)
+
+    # plot the 1D and 2D likelihood functions in a traditional triangle plot
+    samples = sampler.chain.reshape((-1, ndim))
+    fig = corner.corner(
+        samples,
+        labels=fit_param_names,
+        show_titles=True,
+        title_fmt=".3f",
+        use_math_text=True,
+    )
+    fig.savefig("%s_param_triangle.png" % filebase)
+    plt.close(fig)
+
+
 if __name__ == '__main__':
+
+    # commandline parser
+    parser = argparse.ArgumentParser()
+    parser.add_argument("extfile", help="file with extinction curve")
+    parser.add_argument(
+        "--nsteps", type=int, default=1000, help="# of steps in MCMC chain"
+    )
+    parser.add_argument("--png", help="save figure as a png file", action="store_true")
+    parser.add_argument("--pdf", help="save figure as a pdf file", action="store_true")
+    args = parser.parse_args()
 
     # get the data to fit
     mwext = GCC09_MWAvg()
@@ -263,7 +305,9 @@ if __name__ == '__main__':
     gindxs = x > 3.125
 
     # get a saved extnction curve
-    file = '/home/kgordon/Python_git/spitzer_mir_ext/fits/hd147889_hd064802_ext.fits'
+    file = args.extfile
+    # file = '/home/kgordon/Python_git/spitzer_mir_ext/fits/hd147889_hd064802_ext.fits'
+    ofile = file.replace('.fits', '_fm90.fits')
     ext = ExtData(filename=file)
     gindxs = ext.npts['IUE'] > 0
     x = 1.0 / ext.waves['IUE'][gindxs].to(u.micron).value
@@ -277,7 +321,7 @@ if __name__ == '__main__':
     # pick the fitter
     fit = LevMarLSQFitter()
     fit2 = SPyMinimizeFitter()
-    nsteps = 1000
+    nsteps = args.nsteps
     fit3 = EmceeFitter(nsteps=nsteps)
 
     # fit the data to the FM90 model using the fitter
@@ -285,6 +329,22 @@ if __name__ == '__main__':
     fm90_fit = fit(fm90_init, x[gindxs], y[gindxs], weights=1.0 / y_unc[gindxs])
     fm90_fit2 = fit2(fm90_init, x[gindxs], y[gindxs], weights=1.0 / y_unc[gindxs])
     fm90_fit3 = fit3(fm90_fit2, x[gindxs], y[gindxs], weights=1.0 / y_unc[gindxs])
+
+    fm90_best_params = (fm90_fit2.param_names, fm90_fit2.parameters)
+
+    # percentile parameters
+    samples = fit3.fit_info['sampler'].chain.reshape((-1, 6))
+    per_params = [
+        (v[1], v[2] - v[1], v[1] - v[0])
+        for v in zip(*np.percentile(samples, [16, 50, 84], axis=0))
+    ]
+    fm90_per_params = (fm90_fit3.param_names, per_params)
+    ext.save(ofile, fm90_best_params=fm90_best_params,
+             fm90_per_params=fm90_per_params)
+
+    plot_emcee_results(fit3.fit_info['sampler'], fm90_fit3.param_names,
+                       filebase=ofile.replace('.fits', ''))
+
     # print(fit3.fit_info['perparams'])
 
     # print(fit3.fit_info['sampler'].get_autocorr_time())
@@ -309,10 +369,20 @@ if __name__ == '__main__':
         plt.plot(x[gindxs], model_copy(x[gindxs]), "C1", alpha=0.05)
 
     ax.set_xlabel(r'$x$ [$\mu m^{-1}$]')
-    ax.set_ylabel('$A(x)/A(V)$')
+    # ax.set_ylabel('$A(x)/A(V)$')
+    ax.set_ylabel(r'$E(\lambda - V)')
 
-    ax.set_title('FM90 Fit to G09_MWAvg curve')
+    ax.set_title(file)
+    # ax.set_title('FM90 Fit to G09_MWAvg curve')
 
     ax.legend(loc='best')
     plt.tight_layout()
-    plt.show()
+
+    # plot or save to a file
+    outname = ofile.replace('.fits', '')
+    if args.png:
+        fig.savefig(outname + ".png")
+    elif args.pdf:
+        fig.savefig(outname + ".pdf")
+    else:
+        plt.show()
