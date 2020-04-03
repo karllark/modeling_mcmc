@@ -358,7 +358,7 @@ if __name__ == "__main__":
     #   use the initialized model as the starting point
     fm90_fit = fit(fm90_init, x[gindxs], y[gindxs], weights=1.0 / y_unc[gindxs])
     fm90_fit2 = fit2(fm90_init, x[gindxs], y[gindxs], weights=1.0 / y_unc[gindxs])
-    fm90_fit3 = fit3(fm90_fit2, x[gindxs], y[gindxs], weights=1.0 / y_unc[gindxs])
+    fm90_fit3 = fit3(fm90_fit, x[gindxs], y[gindxs], weights=1.0 / y_unc[gindxs])
 
     # checking the uncertainties
     print("Best Fit Parameters")
