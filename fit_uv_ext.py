@@ -333,30 +333,17 @@ if __name__ == "__main__":
     parser.add_argument("--pdf", help="save figure as a pdf file", action="store_true")
     args = parser.parse_args()
 
-    # a = astrounc.normal(1*u.kpc, std=30*u.pc, n_samples=10000)
-    # b = astrounc.normal(2*u.kpc, std=40*u.pc, n_samples=10000)
-    # c = a + b
-    # z = c.pdf_mean()
-    # print(z)
-    # exit()
-
-    # get the data to fit
-    mwext = GCC09_MWAvg()
-    x = mwext.obsdata_x_iue
-    y = mwext.obsdata_axav_iue
-    y_unc = mwext.obsdata_axav_unc_iue * 10.0
-    gindxs = x > 3.125
-
     # get a saved extnction curve
     file = args.extfile
     # file = '/home/kgordon/Python_git/spitzer_mir_ext/fits/hd147889_hd064802_ext.fits'
     ofile = file.replace(".fits", "_fm90.fits")
     ext = ExtData(filename=file)
+    ext.trans_elv_alav(av=float(ext.columns['AV'][0]))
     gindxs = ext.npts["IUE"] > 0
     x = 1.0 / ext.waves["IUE"][gindxs].to(u.micron).value
     y = ext.exts["IUE"][gindxs]
     y_unc = ext.uncs["IUE"][gindxs]
-    gindxs = x > 3.5
+    gindxs = (x > 3.5) & (x < 8.0)
 
     # initialize the model
     fm90_init = FM90()
@@ -434,7 +421,7 @@ if __name__ == "__main__":
 
     ax.set_xlabel(r"$x$ [$\mu m^{-1}$]")
     # ax.set_ylabel('$A(x)/A(V)$')
-    ax.set_ylabel(r"$E(\lambda - V)")
+    ax.set_ylabel(r"$A(\lambda)/A(V)$")
 
     ax.set_title(file)
     # ax.set_title('FM90 Fit to G09_MWAvg curve')
